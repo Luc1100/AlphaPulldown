@@ -125,12 +125,15 @@ RUN rm -rf "$PIP_CACHE_DIR" && mkdir -p "$PIP_CACHE_DIR" && \
     pip install --no-deps . && \
     rm -rf "$PIP_CACHE_DIR"
 
-# Upgrade nvidia-cuda-nvcc (ptxas) and nvidia-nvjitlink (JIT linker) for
-# Blackwell (CC 10.0).  pip-compile resolves to 12.6.x which lacks CC 10.0
-# PTX support.  CUDA 12.8+ adds Blackwell support to both tools.
+# Upgrade nvidia-cuda-nvcc (ptxas), nvidia-nvjitlink (JIT linker), and
+# nvidia-cuda-nvrtc (runtime compilation, needed by cuDNN) for Blackwell
+# (CC 10.0).  pip-compile resolves to 12.6.x which lacks CC 10.0 support.
+# CUDA 12.8+ adds Blackwell support to all three.
 RUN pip install --no-cache-dir --upgrade \
     "nvidia-cuda-nvcc-cu12>=12.8" \
-    "nvidia-nvjitlink-cu12>=12.8"
+    "nvidia-nvjitlink-cu12>=12.8" \
+    "nvidia-cuda-nvrtc-cu12>=12.8" \
+    "nvidia-cudnn-cu12>=9.5"
 
 # nvidia-cuda-nvcc-cu12 >=12.8 is a namespace package (__file__ is None),
 # which crashes JAX's CUDA path auto-detection.  Adding __init__.py fixes it.
