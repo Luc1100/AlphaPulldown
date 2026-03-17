@@ -86,6 +86,32 @@ ENV CXX=clang++
 ENV CMAKE_BUILD_PARALLEL_LEVEL=2
 
 
+# ---- Blackwell (CC 10.0) compatibility patches ----
+# JAX >=0.4.35 adds CC 10.0 support; dm-haiku >=0.0.14 matches new JAX internals.
+# jax-triton 0.2.0 uses removed jax.core.Primitive; drop it (triton gemm is
+# disabled via XLA_FLAGS anyway).  pip-compile re-solves the full tree below.
+RUN sed -i \
+    -e 's/"jax==0.4.34"/"jax>=0.4.35"/' \
+    -e 's/"jax\[cuda12\]==0.4.34"/"jax[cuda12]>=0.4.35"/' \
+    -e 's/"dm-haiku==0.0.13"/"dm-haiku>=0.0.14"/' \
+    -e '/"jax-triton==0.2.0"/d' \
+    -e 's/"triton==3.1.0"/"triton>=3.1.0"/' \
+    pyproject.toml
+
+# Make the jax_triton import in attention.py lazy so the XLA attention
+# fallback still works when jax-triton is absent.  The auto-detect path
+# (implementation=None) already catches exceptions and falls back to XLA.
+RUN python3 -c "
+import pathlib
+p = pathlib.Path('src/alphafold3/jax/attention/attention.py')
+src = p.read_text()
+src = src.replace(
+    'from alphafold3.jax.attention import flash_attention as attention_triton',
+    'try:\n    from alphafold3.jax.attention import flash_attention as attention_triton\nexcept ImportError:\n    attention_triton = None',
+)
+p.write_text(src)
+"
+
 RUN rm -rf "$PIP_CACHE_DIR" && mkdir -p "$PIP_CACHE_DIR" && \
     pip-compile \
         --no-reuse-hashes \

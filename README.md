@@ -362,6 +362,7 @@ structure_inference_arguments:
   --buckets: ['64', '128', '256', '512', '768', '1024', '1280', '1536', '2048', '2560', '3072', '3584', '4096', '4608', '5120']
 
 # Flash attention implementation to use. 'triton' and 'cudnn' uses a Triton and cuDNN flash attention implementation, respectively. The Triton kernel is fastest and has been tested more thoroughly. The Triton and cuDNN kernels require Ampere GPUs or later. 'xla' uses an XLA attention implementation (no flash attention) and is portable across GPU devices.
+# NOTE: On Blackwell GPUs (B100/B200, Compute Capability 10.0), use 'xla' — the Triton flash attention kernel is not yet supported on this architecture.
   --flash_attention_implementation: triton
 
 # Number of diffusion samples to generate.
