@@ -53,7 +53,7 @@ RUN cd /hmmer_build && \
 # ---------------------------------------------------------------------
 # Clone AlphaPulldown with submodules
 # ---------------------------------------------------------------------
-RUN git clone --recurse-submodules https://github.com/KosinskiLab/AlphaPulldown.git /app/AlphaPulldown
+RUN git clone --recurse-submodules https://github.com/Luc1100/AlphaPulldown.git /app/AlphaPulldown
 
 # ---------------------------------------------------------------------
 # Install AlphaFold3 via uv (matching upstream approach)
@@ -61,7 +61,7 @@ RUN git clone --recurse-submodules https://github.com/KosinskiLab/AlphaPulldown.
 WORKDIR /app/AlphaPulldown/alphafold3
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_LINK_MODE=copy uv sync --frozen --all-groups --no-editable
+    UV_LINK_MODE=copy uv sync --all-groups --no-editable
 
 # Build chemical components database
 RUN uv run build_data
