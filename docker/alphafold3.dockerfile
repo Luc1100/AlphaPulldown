@@ -132,6 +132,16 @@ RUN pip install --no-cache-dir --upgrade \
     "nvidia-cuda-nvcc-cu12>=12.8" \
     "nvidia-nvjitlink-cu12>=12.8"
 
+# nvidia-cuda-nvcc-cu12 >=12.8 is a namespace package (__file__ is None),
+# which crashes JAX's CUDA path auto-detection.  Adding __init__.py fixes it.
+RUN python3 -c "\
+import nvidia.cuda_nvcc as m; \
+import pathlib; \
+init = pathlib.Path(m.__path__[0]) / '__init__.py'; \
+init.write_text('# Fix namespace package for JAX CUDA path detection\n'); \
+print(f'Created {init}')\
+"
+
 # ---------------------------------------------------------------------
 # Build CCD database
 # ---------------------------------------------------------------------
