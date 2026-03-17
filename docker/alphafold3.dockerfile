@@ -15,6 +15,7 @@ RUN apt-get update && \
         wget \
         ca-certificates \
         git \
+        patch \
         zlib1g-dev \
         zstd \
     && rm -rf /var/lib/apt/lists/*
