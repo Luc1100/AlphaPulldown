@@ -125,6 +125,13 @@ RUN rm -rf "$PIP_CACHE_DIR" && mkdir -p "$PIP_CACHE_DIR" && \
     pip install --no-deps . && \
     rm -rf "$PIP_CACHE_DIR"
 
+# Upgrade nvidia-cuda-nvcc (ptxas) and nvidia-nvjitlink (JIT linker) for
+# Blackwell (CC 10.0).  pip-compile resolves to 12.6.x which lacks CC 10.0
+# PTX support.  CUDA 12.8+ adds Blackwell support to both tools.
+RUN pip install --no-cache-dir --upgrade \
+    "nvidia-cuda-nvcc-cu12>=12.8" \
+    "nvidia-nvjitlink-cu12>=12.8"
+
 # ---------------------------------------------------------------------
 # Build CCD database
 # ---------------------------------------------------------------------
