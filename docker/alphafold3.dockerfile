@@ -101,15 +101,15 @@ RUN sed -i \
 # Make the jax_triton import in attention.py lazy so the XLA attention
 # fallback still works when jax-triton is absent.  The auto-detect path
 # (implementation=None) already catches exceptions and falls back to XLA.
-RUN python3 -c "
-import pathlib
-p = pathlib.Path('src/alphafold3/jax/attention/attention.py')
-src = p.read_text()
-src = src.replace(
-    'from alphafold3.jax.attention import flash_attention as attention_triton',
-    'try:\n    from alphafold3.jax.attention import flash_attention as attention_triton\nexcept ImportError:\n    attention_triton = None',
-)
-p.write_text(src)
+RUN python3 -c "\
+import pathlib;\
+p = pathlib.Path('src/alphafold3/jax/attention/attention.py');\
+src = p.read_text();\
+src = src.replace(\
+    'from alphafold3.jax.attention import flash_attention as attention_triton',\
+    'try:\n    from alphafold3.jax.attention import flash_attention as attention_triton\nexcept ImportError:\n    attention_triton = None',\
+);\
+p.write_text(src)\
 "
 
 RUN rm -rf "$PIP_CACHE_DIR" && mkdir -p "$PIP_CACHE_DIR" && \
