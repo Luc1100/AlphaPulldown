@@ -1,42 +1,33 @@
 FROM nvidia/cuda:12.6.3-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="/hmmer/bin:${VIRTUAL_ENV}/bin:${PATH}"
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # ---------------------------------------------------------------------
 # System deps
 # ---------------------------------------------------------------------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 \
-        python3-venv \
-        python3-dev \
-        gcc-12 g++-12 \
-        build-essential \
-        libc6-dev \
+        python3.12 \
+        python3.12-dev \
+        gcc \
+        g++ \
+        make \
         wget \
         ca-certificates \
         git \
-        patch \
-        xz-utils \
-        bzip2 \
-        make \
-        pkg-config \
         zlib1g-dev \
+        zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Force gcc-12 (avoid gcc-13 ICE on 24.04)
-ENV CC=gcc-12
-ENV CXX=g++-12
+# ---------------------------------------------------------------------
+# uv (matching upstream AF3 Dockerfile)
+# ---------------------------------------------------------------------
+COPY --from=ghcr.io/astral-sh/uv:0.9.24 /uv /uvx /bin/
 
-# ---------------------------------------------------------------------
-# Python venv  (PIN pip so pip-tools works)
-# ---------------------------------------------------------------------
-RUN python3 -m venv ${VIRTUAL_ENV} && \
-    pip install --no-cache-dir --upgrade "pip<25.3" setuptools wheel && \
-    pip install --no-cache-dir "pip-tools==7.5.2"
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+RUN uv venv $UV_PROJECT_ENVIRONMENT
+ENV PATH="/hmmer/bin:${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
 # ---------------------------------------------------------------------
 # HMMER (with seq_limit patch)
@@ -64,91 +55,15 @@ RUN cd /hmmer_build && \
 RUN git clone --recurse-submodules https://github.com/KosinskiLab/AlphaPulldown.git /app/AlphaPulldown
 
 # ---------------------------------------------------------------------
-# Install AlphaFold3 (regenerate dev-requirements inside image)
+# Install AlphaFold3 via uv (matching upstream approach)
 # ---------------------------------------------------------------------
 WORKDIR /app/AlphaPulldown/alphafold3
 
-# force real PyPI, not a mirror
-ARG PIP_INDEX_URL=https://pypi.org/simple
-ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
-    PIP_DEFAULT_TIMEOUT=600 \
-    PIP_RETRIES=10 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_LINK_MODE=copy uv sync --frozen --all-groups --no-editable
 
-ENV PIP_CACHE_DIR=/tmp/pip-cache
-ENV CMAKE_BUILD_PARALLEL_LEVEL=1
-ENV CFLAGS="-O2 -pipe"
-ENV CXXFLAGS="-O2 -pipe"
-RUN apt-get update && apt-get install -y clang lld
-ENV CC=clang
-ENV CXX=clang++
-ENV CMAKE_BUILD_PARALLEL_LEVEL=2
-
-
-# ---- Blackwell (CC 10.0) compatibility patches ----
-# JAX >=0.4.35 adds CC 10.0 support; dm-haiku >=0.0.14 matches new JAX internals.
-# jax-triton 0.2.0 uses removed jax.core.Primitive; drop it (triton gemm is
-# disabled via XLA_FLAGS anyway).  pip-compile re-solves the full tree below.
-RUN sed -i \
-    -e 's/"jax==0.4.34"/"jax>=0.4.35"/' \
-    -e 's/"jax\[cuda12\]==0.4.34"/"jax[cuda12]>=0.4.35"/' \
-    -e 's/"dm-haiku==0.0.13"/"dm-haiku>=0.0.14"/' \
-    -e '/"jax-triton==0.2.0"/d' \
-    -e 's/"triton==3.1.0"/"triton>=3.1.0"/' \
-    pyproject.toml
-
-# Make the jax_triton import in attention.py lazy so the XLA attention
-# fallback still works when jax-triton is absent.  The auto-detect path
-# (implementation=None) already catches exceptions and falls back to XLA.
-RUN python3 -c "\
-import pathlib;\
-p = pathlib.Path('src/alphafold3/jax/attention/attention.py');\
-src = p.read_text();\
-src = src.replace(\
-    'from alphafold3.jax.attention import flash_attention as attention_triton',\
-    'try:\n    from alphafold3.jax.attention import flash_attention as attention_triton\nexcept ImportError:\n    attention_triton = None',\
-);\
-p.write_text(src)\
-"
-
-RUN rm -rf "$PIP_CACHE_DIR" && mkdir -p "$PIP_CACHE_DIR" && \
-    pip-compile \
-        --no-reuse-hashes \
-        --extra=dev \
-        --generate-hashes \
-        --resolver=backtracking \
-        --output-file=dev-requirements.txt \
-        pyproject.toml && \
-    pip install --require-hashes -r dev-requirements.txt && \
-    pip install git+https://github.com/openmm/pdbfixer.git && \
-    pip install --no-deps . && \
-    rm -rf "$PIP_CACHE_DIR"
-
-# Upgrade nvidia-cuda-nvcc (ptxas), nvidia-nvjitlink (JIT linker), and
-# nvidia-cuda-nvrtc (runtime compilation, needed by cuDNN) for Blackwell
-# (CC 10.0).  pip-compile resolves to 12.6.x which lacks CC 10.0 support.
-# CUDA 12.8+ adds Blackwell support to all three.
-RUN pip install --no-cache-dir --upgrade \
-    "nvidia-cuda-nvcc-cu12>=12.8" \
-    "nvidia-nvjitlink-cu12>=12.8" \
-    "nvidia-cuda-nvrtc-cu12>=12.8" \
-    "nvidia-cudnn-cu12>=9.5"
-
-# nvidia-cuda-nvcc-cu12 >=12.8 is a namespace package (__file__ is None),
-# which crashes JAX's CUDA path auto-detection.  Adding __init__.py fixes it.
-RUN python3 -c "\
-import nvidia.cuda_nvcc as m; \
-import pathlib; \
-init = pathlib.Path(m.__path__[0]) / '__init__.py'; \
-init.write_text('# Fix namespace package for JAX CUDA path detection\n'); \
-print(f'Created {init}')\
-"
-
-# ---------------------------------------------------------------------
-# Build CCD database
-# ---------------------------------------------------------------------
-RUN build_data
+# Build chemical components database
+RUN uv run build_data
 
 # ---------------------------------------------------------------------
 # Install AlphaPulldown
@@ -169,9 +84,8 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 # ---------------------------------------------------------------------
 # Sanity check
 # ---------------------------------------------------------------------
-RUN python - << 'EOF'
-from alphafold3.constants import chemical_components
-from alphapulldown.folding_backend.folding_backend import FoldingBackend
-print("AF3 + AlphaPulldown import OK, CCD present")
-EOF
-
+RUN python3 -c "\
+from alphafold3.constants import chemical_components; \
+from alphapulldown.folding_backend.folding_backend import FoldingBackend; \
+print('AF3 + AlphaPulldown import OK, CCD present')\
+"
