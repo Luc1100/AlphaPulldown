@@ -9,6 +9,7 @@ Author: Dmitry Molodenskiy <dmitry.molodenskiy@embl-hamburg.de>
 import csv
 import dataclasses
 import functools
+import json
 import logging
 import os
 import pathlib
@@ -35,7 +36,13 @@ from alphafold.common import residue_constants
 from alphafold.common.protein import Protein, to_mmcif
 from alphapulldown.folding_backend.folding_backend import FoldingBackend
 from alphapulldown.objects import MultimericObject, MonomericObject, ChoppedObject
-from alphapulldown.utils.msa_encoding import ids_to_a3m, a3m_to_ids, ids_to_a3m_af3
+from alphapulldown.utils.af2_to_af3_msa import (
+    Af2ToAf3TranslationResult,
+    msa_rows_and_deletions_to_a3m,
+    translate_af2_individual_chain_features_to_af3_msas_with_stats,
+    translate_af2_complex_msa_to_af3_unpaired_chain_msas_with_stats,
+)
+from alphapulldown.utils.msa_encoding import ids_to_a3m_af3
 
 
 
@@ -265,27 +272,11 @@ def predict_structure(
         except Exception as e:
             logging.error(f"Failed to write final complex MSA A3M: {e}")
 
-    # Utility: dump featurised MSA-related arrays to NPZ for inspection
-    def _dump_featurised_msa_npz(example_batch, seed_value: int):
-        try:
-            if output_dir is None:
-                return
-            os.makedirs(output_dir, exist_ok=True)
-            out_path = os.path.join(
-                output_dir, f"{fold_input.sanitised_name()}_seed-{seed_value}_featurised_msa.npz"
-            )
-
-            np.savez_compressed(out_path, **example_batch)
-            logging.info(f"Wrote featurised MSA arrays to {out_path}")
-        except Exception as e:
-            logging.error(f"Failed to dump featurised MSA arrays: {e}")
-
     for seed, example in zip(fold_input.rng_seeds, featurised_examples):
         logging.info(f'Running model inference for seed {seed}...')
         inference_start_time = time.time()
-        # If requested, dump featurised MSA arrays and final complex A3M for inspection
+        # If requested, dump the post-featurisation merged complex MSA for inspection.
         if debug_msas:
-            _dump_featurised_msa_npz(example, seed)
             _write_final_msa_a3m(example, seed)
 
         rng_key = jax.random.PRNGKey(seed)
@@ -484,11 +475,25 @@ class AlphaFold3Backend(FoldingBackend):
         af3_input_json: list = None,
         features_directory: str = None,
         debug_templates: bool | None = None,
+        debug_msas: bool = False,
     ) -> list:
         """Prepare input for AlphaFold3 prediction."""
         logging.info(f"prepare_input called with {len(objects_to_model)} objects to model")
         for i, entry in enumerate(objects_to_model):
             logging.info(f"Object {i}: {entry}")
+
+        @dataclasses.dataclass(frozen=True, slots=True)
+        class _TranslatedMsaDebugRecord:
+            chain_id: str
+            chain_description: str
+            chain_length: int
+            paired_msa: str
+            unpaired_msa: str
+            paired_msa_row_count: int
+            unpaired_msa_row_count: int
+            paired_species_identifier_count: int
+            paired_rows_without_species_identifier_count: int
+            paired_rows_with_generated_accession_count: int
         
         def get_chain_id(index: int) -> str:
             if index < 26:
@@ -506,6 +511,90 @@ class AlphaFold3Backend(FoldingBackend):
                     chain_id_counter_ref[0] += 1
                     return chain_id
                 chain_id_counter_ref[0] += 1
+
+        def _write_translated_msa_debug_artifacts(
+            *,
+            job_name: str,
+            output_dir: str,
+            chain_records: list[_TranslatedMsaDebugRecord],
+            translation_results: list[Af2ToAf3TranslationResult],
+        ) -> None:
+            if not chain_records or not translation_results:
+                return
+
+            os.makedirs(output_dir, exist_ok=True)
+            summary = {
+                "job_name": job_name,
+                "translation_modes": sorted(
+                    {result.translation_mode for result in translation_results}
+                ),
+                "total_rows_considered": int(
+                    sum(result.total_rows_considered for result in translation_results)
+                ),
+                "occupancy_histogram": {
+                    "0": int(
+                        sum(result.occupancy_histogram.get("0", 0) for result in translation_results)
+                    ),
+                    "1": int(
+                        sum(result.occupancy_histogram.get("1", 0) for result in translation_results)
+                    ),
+                    "ge_2": int(
+                        sum(result.occupancy_histogram.get("ge_2", 0) for result in translation_results)
+                    ),
+                },
+                "paired_row_count": int(sum(result.paired_row_count for result in translation_results)),
+                "invalid_paired_rows": int(
+                    sum(result.invalid_paired_rows for result in translation_results)
+                ),
+                "invalid_unpaired_rows": int(
+                    sum(result.invalid_unpaired_rows for result in translation_results)
+                ),
+                "paired_rows_valid": all(
+                    result.invalid_paired_rows == 0 for result in translation_results
+                ),
+                "unpaired_rows_valid": all(
+                    result.invalid_unpaired_rows == 0 for result in translation_results
+                ),
+                "chains": [],
+            }
+
+            for record in chain_records:
+                chain_id = record.chain_id
+                paired_path = os.path.join(
+                    output_dir, f"{job_name}_chain-{chain_id}_paired_input.a3m"
+                )
+                unpaired_path = os.path.join(
+                    output_dir, f"{job_name}_chain-{chain_id}_unpaired_input.a3m"
+                )
+                with open(paired_path, "wt") as handle:
+                    handle.write(record.paired_msa)
+                with open(unpaired_path, "wt") as handle:
+                    handle.write(record.unpaired_msa)
+
+                summary["chains"].append(
+                    {
+                        "chain_id": chain_id,
+                        "chain_description": record.chain_description,
+                        "chain_length": int(record.chain_length),
+                        "paired_msa_row_count": int(record.paired_msa_row_count),
+                        "unpaired_msa_row_count": int(record.unpaired_msa_row_count),
+                        "paired_species_identifier_count": int(
+                            record.paired_species_identifier_count
+                        ),
+                        "paired_rows_without_species_identifier_count": int(
+                            record.paired_rows_without_species_identifier_count
+                        ),
+                        "paired_rows_with_generated_accession_count": int(
+                            record.paired_rows_with_generated_accession_count
+                        ),
+                    }
+                )
+
+            summary_path = os.path.join(
+                output_dir, f"{job_name}_af2_to_af3_translation_summary.json"
+            )
+            with open(summary_path, "wt") as handle:
+                json.dump(summary, handle, indent=2, sort_keys=True)
 
         def insert_release_date_into_mmcif(
             mmcif_string: str, revision_date: str = '2100-01-01'
@@ -570,26 +659,6 @@ class AlphaFold3Backend(FoldingBackend):
                 i += 1
             return '\n'.join(out_lines)
 
-        def msa_array_to_a3m(msa_array, query_sequence: str | None = None):
-            msa_lines = []
-            if query_sequence is not None and len(query_sequence) > 0:
-                msa_lines.append('>query')
-                msa_lines.append(query_sequence)
-            for i, msa_seq in enumerate(msa_array):
-                seq_str = ''.join([residue_constants.ID_TO_HHBLITS_AA.get(int(aa), 'X') for aa in msa_seq])
-                msa_lines.append(f'>sequence_{i}')
-                msa_lines.append(seq_str)
-            return '\n'.join(msa_lines)
-
-        def msa_array_to_sequences(msa_array, query_sequence: str | None = None) -> List[str]:
-            sequences = []
-            if query_sequence is not None and len(query_sequence) > 0:
-                sequences.append(query_sequence)
-            for msa_seq in (msa_array):
-                sequences.append(''.join([residue_constants.ID_TO_HHBLITS_AA.get(int(aa), 'X') for aa in msa_seq]))
-            return sequences
-
-
         def _monomeric_to_chain(
             mono_obj: Union[MonomericObject, ChoppedObject],
             chain_id: str
@@ -597,8 +666,20 @@ class AlphaFold3Backend(FoldingBackend):
             sequence = mono_obj.sequence
             feature_dict = mono_obj.feature_dict
             msa_array = feature_dict.get('msa')
-            # MSAs from AlphaPulldown objects are paired when MultimericObject is created.
-            unpaired_msa = msa_array_to_a3m(msa_array, query_sequence=sequence) if msa_array is not None else ""
+            deletion_matrix = feature_dict.get('deletion_matrix_int')
+            if deletion_matrix is None:
+                deletion_matrix = feature_dict.get('deletion_matrix')
+            # Standalone AlphaPulldown monomer objects carry only a single custom MSA.
+            # MultimericObject instances override this with an AF2->AF3 translation.
+            unpaired_msa = (
+                msa_rows_and_deletions_to_a3m(
+                    msa_rows=np.asarray(msa_array),
+                    deletion_rows=None if deletion_matrix is None else np.asarray(deletion_matrix),
+                    query_sequence=sequence,
+                )
+                if msa_array is not None
+                else ""
+            )
             paired_msa = ""
             templates = []
             if 'template_aatype' in feature_dict:
@@ -615,7 +696,6 @@ class AlphaFold3Backend(FoldingBackend):
                         if isinstance(template_sequence, bytes):
                             template_sequence = template_sequence.decode('utf-8')
                         template_mask = feature_dict["template_all_atom_masks"][i]
-                        chain_index_array = np.zeros_like(feature_dict["residue_index"], dtype=int)
                         hh_ids = np.argmax(feature_dict["template_aatype"][i], axis=-1)
                         if np.sum(template_mask) == 0:
                             logging.info(f"Skipping template {i} ({pdb_code_chain}) - no atoms in region")
@@ -776,42 +856,78 @@ class AlphaFold3Backend(FoldingBackend):
                 all_chains.extend(chains)
             elif isinstance(obj, MultimericObject):
                 chains = []
-                # Use the already-paired complex MSA from the MultimericObject to slice per chain
-                combined_msa = obj.feature_dict.get('msa', None)
-                col_offset = 0
-                for interactor in obj.interactors:
+                translated_result = None
+                combined_msa = obj.feature_dict.get('msa')
+                translated_result = (
+                    translate_af2_individual_chain_features_to_af3_msas_with_stats(
+                        chain_feature_dicts=[
+                            interactor.feature_dict for interactor in obj.interactors
+                        ],
+                        chain_sequences=[interactor.sequence for interactor in obj.interactors],
+                    )
+                )
+                num_pairable_chains = sum(
+                    chain_stats.paired_species_identifier_count > 0
+                    for chain_stats in translated_result.chain_stats
+                )
+                if num_pairable_chains < 2 and combined_msa is not None:
+                    # Fall back to the merged AF2 multimer MSA transport path when the
+                    # individual `_all_seq` features do not carry usable species IDs.
+                    translated_result = (
+                        translate_af2_complex_msa_to_af3_unpaired_chain_msas_with_stats(
+                            merged_msa=np.asarray(combined_msa),
+                            chain_sequences=[interactor.sequence for interactor in obj.interactors],
+                            num_alignments=obj.feature_dict.get('num_alignments'),
+                            deletion_matrix=(
+                                obj.feature_dict.get('deletion_matrix_int')
+                                if obj.feature_dict.get('deletion_matrix_int') is not None
+                                else obj.feature_dict.get('deletion_matrix')
+                            ),
+                            asym_id=obj.feature_dict.get('asym_id'),
+                        )
+                    )
+
+                for chain_index, interactor in enumerate(obj.interactors):
                     chain_id = get_next_available_chain_id(used_chain_ids, chain_id_counter_ref)
                     used_chain_ids.add(chain_id)
                     logging.info(f"Added chain ID '{chain_id}' for multimeric interactor")
                     base_chain = _monomeric_to_chain(interactor, chain_id)
-                    if combined_msa is not None:
-                        try:
-                            chain_len = len(interactor.sequence)
-                            chain_msa_slice = np.asarray(combined_msa)[:, col_offset:col_offset + chain_len]
-                            # If the chain_msa_slice is all gaps ('-'), skip it
-                            col_offset += chain_len
-                            a3m_sliced = ""
-                            sequences = msa_array_to_sequences(chain_msa_slice, query_sequence=base_chain.sequence)
-                            for i, sequence in enumerate(sequences):
-                                header = f"sequence_{i}"
-                                # Skip sequences that are entirely gaps ('-')
-                                if set(sequence) == {'-'}:
-                                    #logging.debug(f"Skipping {header} - all gaps")
-                                    continue
-                                a3m_sliced += f">{header}\n{sequence}\n"
-
-                            base_chain = folding_input.ProteinChain(
-                                id=base_chain.id,
-                                sequence=base_chain.sequence,
-                                ptms=base_chain.ptms,
-                                unpaired_msa=a3m_sliced,
-                                paired_msa='',
-                                templates=base_chain.templates,
+                    if translated_result is not None:
+                        chain_msas = translated_result.chain_msas[chain_index]
+                        chain_stats = translated_result.chain_stats[chain_index]
+                        base_chain = folding_input.ProteinChain(
+                            id=base_chain.id,
+                            sequence=base_chain.sequence,
+                            ptms=base_chain.ptms,
+                            unpaired_msa=chain_msas.unpaired_msa,
+                            paired_msa=chain_msas.paired_msa,
+                            templates=base_chain.templates,
+                        )
+                        af2_translated_msa_chain_ids.add(base_chain.id)
+                        if debug_msas:
+                            translation_debug_chain_records.append(
+                                _TranslatedMsaDebugRecord(
+                                    chain_id=base_chain.id,
+                                    chain_description=interactor.description,
+                                    chain_length=len(interactor.sequence),
+                                    paired_msa=chain_msas.paired_msa,
+                                    unpaired_msa=chain_msas.unpaired_msa,
+                                    paired_msa_row_count=chain_stats.paired_msa_row_count,
+                                    unpaired_msa_row_count=chain_stats.unpaired_msa_row_count,
+                                    paired_species_identifier_count=(
+                                        chain_stats.paired_species_identifier_count
+                                    ),
+                                    paired_rows_without_species_identifier_count=(
+                                        chain_stats.paired_rows_without_species_identifier_count
+                                    ),
+                                    paired_rows_with_generated_accession_count=(
+                                        chain_stats.paired_rows_with_generated_accession_count
+                                    ),
+                                )
                             )
-                            custom_unpaired_chain_ids.add(base_chain.id)
-                        except Exception as e:
-                            logging.error(f"Failed to slice combined MSA for chain {chain_id}: {e}")
                     chains.append(base_chain)
+                if debug_msas and translated_result is not None:
+                    translation_debug_results.append(translated_result)
                 all_chains.extend(chains)
             else:
                 raise TypeError(f"Unsupported object type for folding input conversion: {type(obj)}")
@@ -821,8 +937,11 @@ class AlphaFold3Backend(FoldingBackend):
         used_chain_ids = set()  # Track used chain IDs
         all_chains = []
         job_name = "ranked_0"
-        # Track chains constructed from a MultimericObject with custom unpaired MSAs
-        custom_unpaired_chain_ids: set[str] = set()
+        # Track chains whose MSAs were translated from AF2 features; they must
+        # not be rewritten by the promotion heuristic below.
+        af2_translated_msa_chain_ids: set[str] = set()
+        translation_debug_chain_records: list[_TranslatedMsaDebugRecord] = []
+        translation_debug_results: list[Af2ToAf3TranslationResult] = []
 
         for entry in objects_to_model:
             object_to_model = entry['object']
@@ -843,12 +962,12 @@ class AlphaFold3Backend(FoldingBackend):
 
         # Create a single combined input with all chains
         if all_chains:
-            # Promote unpaired->paired only for chains not constructed via MultimericObject slicing
+            # Promote unpaired->paired only for chains not constructed from AF2 multimer features.
             promoted_chains: list[folding_input.ProteinChain | folding_input.RnaChain | folding_input.DnaChain | folding_input.Ligand] = []
             for ch in all_chains:
                 if (
                     isinstance(ch, folding_input.ProteinChain)
-                    and ch.id not in custom_unpaired_chain_ids
+                    and ch.id not in af2_translated_msa_chain_ids
                 ):
                     try:
                         has_empty_paired = (getattr(ch, 'paired_msa', None) in (None, ''))
@@ -876,8 +995,15 @@ class AlphaFold3Backend(FoldingBackend):
             )
             # Use the output directory from the first object
             first_output_dir = objects_to_model[0]['output_dir']
-            # Disable resolve_msa_overlaps when we provided custom per-chain unpaired MSAs
-            disable_overlaps = len(custom_unpaired_chain_ids) > 0
+            if debug_msas:
+                _write_translated_msa_debug_artifacts(
+                    job_name=combined_input.sanitised_name(),
+                    output_dir=first_output_dir,
+                    chain_records=translation_debug_chain_records,
+                    translation_results=translation_debug_results,
+                )
+            # Disable overlap resolution when we provide translated AF2 multimer MSAs.
+            disable_overlaps = len(af2_translated_msa_chain_ids) > 0
             prepared_inputs.append({combined_input: (first_output_dir, not disable_overlaps)})
 
         return prepared_inputs
@@ -909,6 +1035,7 @@ class AlphaFold3Backend(FoldingBackend):
             af3_input_json=kwargs.get("af3_input_json"),
             features_directory=kwargs.get("features_directory"),
             debug_templates=kwargs.get("debug_templates", False),
+            debug_msas=kwargs.get("debug_msas", False),
         )
         # Run predictions
         for mapping in prepared_inputs:
@@ -970,4 +1097,3 @@ class AlphaFold3Backend(FoldingBackend):
             output_dir=output_dir,
             job_name=job_name,
         )
-
