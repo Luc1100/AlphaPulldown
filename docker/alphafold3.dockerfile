@@ -27,7 +27,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.24 /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
-RUN uv venv $UV_PROJECT_ENVIRONMENT
+RUN uv venv --seed $UV_PROJECT_ENVIRONMENT
 ENV PATH="/hmmer/bin:${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
 # ---------------------------------------------------------------------
