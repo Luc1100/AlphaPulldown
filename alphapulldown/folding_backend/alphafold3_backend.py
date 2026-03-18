@@ -139,8 +139,8 @@ class ModelRunner:
             self.device,
         )
         result = self._model(rng_key, featurised_example)
-        result = jax.tree_map(np.asarray, result)
-        result = jax.tree_map(
+        result = jax.tree.map(np.asarray, result)
+        result = jax.tree.map(
             lambda x: x.astype(jnp.float32) if x.dtype == jnp.bfloat16 else x,
             result,
         )
