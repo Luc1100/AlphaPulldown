@@ -94,7 +94,8 @@ RUN pip install --no-cache-dir --no-deps . && \
         "immutabledict>=2.0.0" \
         "typing-extensions>=4.14.0" \
         "openmm>=8.0" \
-        "pdbfixer"
+        "pdbfixer" \
+        "requests"
 
 # ---------------------------------------------------------------------
 # Runtime env
