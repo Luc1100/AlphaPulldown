@@ -68,9 +68,31 @@ RUN uv run build_data
 
 # ---------------------------------------------------------------------
 # Install AlphaPulldown
+# --no-deps avoids re-resolving/clobbering the AF3 that uv installed.
+# Install AlphaPulldown's own dependencies first, then the package.
 # ---------------------------------------------------------------------
 WORKDIR /app/AlphaPulldown
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps . && \
+    pip install --no-cache-dir \
+        "absl-py>=0.13.0" \
+        "alphapulldown-input-parser>=0.3.0" \
+        "dm-tree>=0.1.6" \
+        "h5py>=3.1.0" \
+        "matplotlib>=3.3.3" \
+        "ml-collections>=0.1.0" \
+        "pandas>=1.5.3" \
+        "tensorflow-cpu>=2.16.1" \
+        "importlib-resources>=6.1.0" \
+        "importlib-metadata>=4.8.2,<5.0.0" \
+        "biopython>=1.82" \
+        "nbformat>=5.9.2" \
+        "py3Dmol==2.0.4" \
+        "tqdm>=4.66.1" \
+        "appdirs>=1.4.4" \
+        "ml-dtypes" \
+        "chex>=0.1.86" \
+        "immutabledict>=2.0.0" \
+        "typing-extensions>=4.14.0"
 
 # ---------------------------------------------------------------------
 # Runtime env
