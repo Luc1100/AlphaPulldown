@@ -53,7 +53,9 @@ RUN cd /hmmer_build && \
 # ---------------------------------------------------------------------
 # Clone AlphaPulldown with submodules
 # ---------------------------------------------------------------------
-RUN git clone --recurse-submodules https://github.com/Luc1100/AlphaPulldown.git /app/AlphaPulldown
+RUN git clone --recurse-submodules https://github.com/Luc1100/AlphaPulldown.git /app/AlphaPulldown && \
+    sed -i 's/np.sum(x for x in feats)/np.sum(list(feats), axis=0)/' \
+        /app/AlphaPulldown/alphafold/alphafold/data/msa_pairing.py
 
 # ---------------------------------------------------------------------
 # Install AlphaFold3 via uv (matching upstream approach)
