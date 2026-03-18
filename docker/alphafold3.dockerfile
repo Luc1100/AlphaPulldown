@@ -92,7 +92,9 @@ RUN pip install --no-cache-dir --no-deps . && \
         "ml-dtypes" \
         "chex>=0.1.86" \
         "immutabledict>=2.0.0" \
-        "typing-extensions>=4.14.0"
+        "typing-extensions>=4.14.0" \
+        "openmm>=8.0" \
+        "pdbfixer"
 
 # ---------------------------------------------------------------------
 # Runtime env
